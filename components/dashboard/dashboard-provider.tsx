@@ -696,8 +696,8 @@ export function DashboardProvider({
       const slotsAtTime = (schedule[targetDay] ?? []).filter(
         (s) => s.time === rest.time
       )
-      if (slotsAtTime.length >= 4) {
-        toast.error("This time already has 4 sessions.")
+      if (slotsAtTime.length >= 5) {
+        toast.error("This time already has 5 sessions.")
         return
       }
       if (rest.trainer) {

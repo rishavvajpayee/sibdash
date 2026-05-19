@@ -2439,10 +2439,10 @@ function submitSlot(){
   const learner=document.getElementById('nf-learner').value.trim();
   if(!time){alert('Please select a time slot');return;}
   // Allow empty learner names - can be filled later
-  // Max 4 per time slot
+  // Max 5 per time slot
   const slotsAtTime=(schedule[currentDay]||[]).filter(s=>s.time===time);
-  if(slotsAtTime.length>=4){
-    alert('⚠️ Slot not available — this time slot already has 4 sessions booked. Please choose a different time.');
+  if(slotsAtTime.length>=5){
+    alert('⚠️ Slot not available — this time slot already has 5 sessions booked. Please choose a different time.');
     return;
   }
   const note=document.getElementById('nf-note').value.trim();
