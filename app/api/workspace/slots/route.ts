@@ -29,7 +29,11 @@ export async function POST(request: Request) {
     )
     return NextResponse.json({ slot })
   } catch (e) {
-    return jsonError(e instanceof Error ? e.message : "Failed", 500)
+    const message = e instanceof Error ? e.message : "Failed"
+    if (/refresh and try again|out of sync/i.test(message)) {
+      return jsonError(message, 409)
+    }
+    return jsonError(message, 500)
   }
 }
 

@@ -59,30 +59,44 @@ export async function createScheduleSlot(
   day: Day,
   slot: Omit<Slot, "id"> & { id?: number }
 ) {
-  const id = slot.id ?? (await nextSlotId(supabase))
-  const { error } = await supabase.from("schedule_slots").insert({
-    ...W,
-    id,
-    week_key: weekKey,
-    day,
-    time: slot.time,
-    learner: slot.learner,
-    trainer: slot.trainer ?? "",
-    co_trainer: slot.coTrainer ?? "",
-    type: slot.type ?? "Regular",
-    note: slot.note ?? "",
-    added_by: slot.addedBy ?? userEmail.split("@")[0],
-    added_at: slot.addedAt ?? new Date().toISOString(),
-  })
-  if (error) throw new Error(error.message)
-  await appendEditHistory(
-    supabase,
-    userEmail,
-    "Schedule",
-    "Added slot",
-    `${slot.learner} · ${day} ${slot.time}`
-  )
-  return { ...slot, id } as Slot
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const id = await nextSlotId(supabase)
+    const { error } = await supabase.from("schedule_slots").insert({
+      ...W,
+      id,
+      week_key: weekKey,
+      day,
+      time: slot.time,
+      learner: slot.learner,
+      trainer: slot.trainer ?? "",
+      co_trainer: slot.coTrainer ?? "",
+      type: slot.type ?? "Regular",
+      note: slot.note ?? "",
+      added_by: slot.addedBy ?? userEmail.split("@")[0],
+      added_at: slot.addedAt ?? new Date().toISOString(),
+    })
+
+    if (!error) {
+      await appendEditHistory(
+        supabase,
+        userEmail,
+        "Schedule",
+        "Added slot",
+        `${slot.learner} · ${day} ${slot.time}`
+      )
+      return { ...slot, id } as Slot
+    }
+
+    if (error.code === "23505") continue
+
+    if (error.code === "23503") {
+      throw new Error("Schedule data is out of sync. Please refresh and try again.")
+    }
+
+    throw new Error(error.message)
+  }
+
+  throw new Error("Schedule changed while creating the slot. Please refresh and try again.")
 }
 
 export async function patchScheduleSlot(
