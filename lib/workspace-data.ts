@@ -1,6 +1,7 @@
 import { cache } from "react"
 
 import { createClient } from "@/lib/supabase/server"
+import { loadWorkspaceBootstrap } from "@/lib/workspace/db/assemble"
 
 export type WorkspaceServerState = {
   payload: unknown
@@ -9,14 +10,6 @@ export type WorkspaceServerState = {
 
 export const getWorkspacePayload = cache(async (): Promise<WorkspaceServerState> => {
   const supabase = await createClient()
-  const { data } = await supabase
-    .from("workspace_dashboard")
-    .select("payload, updated_at")
-    .eq("id", "default")
-    .maybeSingle()
-
-  return {
-    payload: data?.payload ?? null,
-    updatedAt: data?.updated_at ?? null,
-  }
+  const { payload, updatedAt } = await loadWorkspaceBootstrap(supabase)
+  return { payload, updatedAt }
 })

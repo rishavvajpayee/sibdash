@@ -15,6 +15,12 @@ import {
 
 export type DashboardPersisted = Omit<WorkspacePayload, "_savedAt">
 
+export function previousWeekKey(weekKey: string): string {
+  const d = new Date(`${weekKey}T00:00:00`)
+  d.setDate(d.getDate() - 7)
+  return getWeekKey(d.toISOString().split("T")[0])
+}
+
 export function getWeekKey(d?: string): string {
   const dt = d ? new Date(`${d}T00:00:00`) : new Date()
   const day = dt.getDay()

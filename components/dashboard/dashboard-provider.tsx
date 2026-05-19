@@ -27,25 +27,22 @@ import {
   type TrackerEntry,
   type WeekStore,
 } from "@/lib/dashboard/constants"
+import { parseTaggedUsers } from "@/lib/dashboard/notifications"
 import {
-  addNotificationDraft,
-  parseTaggedUsers,
-} from "@/lib/dashboard/notifications"
-import {
-  buildPayload,
   type DashboardPersisted,
   mergeRemoteIntoLocal,
   persistedFromRemote,
   fmtWeekRange,
   getWeekKey,
+  previousWeekKey,
 } from "@/lib/dashboard/merge-remote"
+import { workspaceClient } from "@/lib/workspace/client"
 import { mergeTrackerFromSchedule } from "@/lib/dashboard/tracker-utils"
 import {
   dayNameFromDateStr,
   findDuplicateSlots,
   findSlotInWeek,
   getMsgSlotConflict,
-  getSlotWeekData,
   weekKeyForCalendarDate,
 } from "@/lib/dashboard/schedule-utils"
 import { createClient } from "@/lib/supabase/client"
@@ -146,35 +143,10 @@ type DashboardContextValue = {
   closeRSModal: () => void
   bookReschedule: (dateVal: string, timeVal: string) => void
   markRSTBD: () => void
-  saveNow: (snapshot?: DashboardPersisted) => Promise<void>
+  saveNow: (op: () => Promise<unknown>) => Promise<void>
 }
 
 const DashboardContext = createContext<DashboardContextValue | null>(null)
-
-function logEditMutable(
-  draft: DashboardPersisted,
-  userEmail: string,
-  section: string,
-  action: string,
-  detail: string
-) {
-  const user = userEmail.split("@")[0] || "unknown"
-  const now = new Date()
-  const ts =
-    now.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) +
-    " " +
-    now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
-  draft.editHistory.unshift({
-    id: `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    ts,
-    user,
-    actorEmail: userEmail,
-    section,
-    action,
-    detail,
-  })
-  if (draft.editHistory.length > 500) draft.editHistory.length = 500
-}
 
 export function DashboardProvider({
   children,
@@ -233,85 +205,75 @@ export function DashboardProvider({
     }
   }, [])
 
-  const flushSave = useCallback(async (snapshot?: DashboardPersisted) => {
-    pendingWritesRef.current++
-    setSyncStatus("syncing")
-    setSyncMessage("Saving…")
-    try {
-      const payload = buildPayload(snapshot ?? persistedRef.current)
-      const res = await fetch("/api/workspace", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ payload }),
-      })
-      if (!res.ok) {
-        const bodyText = await res.text()
-        let message = bodyText || res.statusText
-        try {
-          const parsed = JSON.parse(bodyText) as {
-            error?: string
-            details?: unknown
-          }
-          if (parsed.error) {
-            message = parsed.error
-          }
-          if (parsed.details !== undefined) {
-            console.error("[workspace PATCH]", parsed.details)
-          }
-        } catch {
-          message = bodyText.slice(0, 280) || res.statusText
-        }
-        throw new Error(message)
-      }
-      setSyncStatus("saved")
-      setSyncMessage("All changes saved ✓")
-      window.setTimeout(() => setSyncMessage("Live sync on"), 1500)
-    } catch (err) {
-      setSyncStatus("error")
-      setSyncMessage("Save failed")
-      const msg =
-        err instanceof Error ? err.message : "Could not save workspace."
-      toast.error(msg, {
-        description:
-          msg.includes("workspace_dashboard") || msg.includes("relation")
-            ? "Run the SQL migration in Supabase (supabase/migrations) and confirm RLS policies."
-            : msg.includes("Unauthorized") || msg.includes("401")
-              ? "Session expired — sign in again."
-              : msg.includes("Invalid payload")
-                ? "Open the browser console for validation details."
-                : undefined,
-      })
-    } finally {
-      pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1)
-      if (pendingWritesRef.current === 0) {
-        const queued = pendingRemotePayloadRef.current
-        if (queued) {
-          pendingRemotePayloadRef.current = null
-          setPersisted((prev) => mergeRemoteIntoLocal(prev, queued))
-        }
+  const finishPersist = useCallback(() => {
+    pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1)
+    if (pendingWritesRef.current === 0) {
+      const queued = pendingRemotePayloadRef.current
+      if (queued) {
+        pendingRemotePayloadRef.current = null
+        setPersisted((prev) => mergeRemoteIntoLocal(prev, queued))
       }
     }
   }, [])
 
-  const scheduleDebouncedSave = useCallback(() => {
-    setSyncStatus("syncing")
-    setSyncMessage("Saving…")
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
-    debounceTimerRef.current = setTimeout(() => {
-      debounceTimerRef.current = null
-      void flushSave()
-    }, 600)
-  }, [flushSave])
+  const runPersist = useCallback(
+    async (op: () => Promise<unknown>) => {
+      pendingWritesRef.current++
+      setSyncStatus("syncing")
+      setSyncMessage("Saving…")
+      try {
+        await op()
+        setSyncStatus("saved")
+        setSyncMessage("All changes saved ✓")
+        window.setTimeout(() => setSyncMessage("Live sync on"), 1500)
+      } catch (err) {
+        setSyncStatus("error")
+        setSyncMessage("Save failed")
+        const msg =
+          err instanceof Error ? err.message : "Could not save workspace."
+        toast.error(msg, {
+          description:
+            msg.includes("relation") || msg.includes("does not exist")
+              ? "Run Supabase migrations (supabase/migrations) and confirm RLS policies."
+              : msg.includes("Unauthorized") || msg.includes("401")
+                ? "Session expired — sign in again."
+                : undefined,
+        })
+      } finally {
+        finishPersist()
+      }
+    },
+    [finishPersist]
+  )
+
+  const pendingOpRef = useRef<(() => Promise<unknown>) | null>(null)
+
+  const scheduleDebouncedSave = useCallback(
+    (op: () => Promise<unknown>) => {
+      pendingOpRef.current = op
+      setSyncStatus("syncing")
+      setSyncMessage("Saving…")
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+      debounceTimerRef.current = setTimeout(() => {
+        debounceTimerRef.current = null
+        const fn = pendingOpRef.current
+        pendingOpRef.current = null
+        if (fn) void runPersist(fn)
+      }, 600)
+    },
+    [runPersist]
+  )
 
   const saveNow = useCallback(
-    async (snapshot?: DashboardPersisted) => {
+    async (op: () => Promise<unknown>) => {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current)
         debounceTimerRef.current = null
       }
-      await flushSave(snapshot)
+      pendingOpRef.current = null
+      await runPersist(op)
     },
-    [flushSave]
+    [runPersist]
   )
 
   const mergeFromRemote = useCallback((remote: unknown) => {
@@ -352,29 +314,47 @@ export function DashboardProvider({
     return () => window.clearTimeout(t)
   }, [pathname, mergeFromRemote])
 
+  const refetchRemoteRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const refetchWorkspace = useCallback(() => {
+    void workspaceClient
+      .fetchBootstrap()
+      .then((body) => {
+        if (body?.payload && typeof body.payload === "object") {
+          mergeFromRemote(body.payload)
+        }
+      })
+      .catch(() => {})
+  }, [mergeFromRemote])
+
   useEffect(() => {
     const supabase = createClient()
     const channel = supabase
-      .channel("workspace_dashboard_row")
+      .channel("workspace_meta_row")
       .on(
         "postgres_changes",
         {
           event: "UPDATE",
           schema: "public",
-          table: "workspace_dashboard",
-          filter: "id=eq.default",
+          table: "workspace_meta",
+          filter: "workspace_id=eq.default",
         },
-        (payload) => {
-          const row = payload.new as { payload?: unknown }
-          if (row?.payload) mergeFromRemote(row.payload)
+        () => {
+          if (pendingWritesRef.current > 0) return
+          if (refetchRemoteRef.current) clearTimeout(refetchRemoteRef.current)
+          refetchRemoteRef.current = setTimeout(() => {
+            refetchRemoteRef.current = null
+            refetchWorkspace()
+          }, 300)
         }
       )
       .subscribe()
 
     return () => {
+      if (refetchRemoteRef.current) clearTimeout(refetchRemoteRef.current)
       void supabase.removeChannel(channel)
     }
-  }, [mergeFromRemote])
+  }, [refetchWorkspace])
 
   const schedule = useMemo(() => {
     const w = persisted.userWeeks[currentWeekKey]
@@ -419,70 +399,40 @@ export function DashboardProvider({
   )
 
   const copyFromLastWeek = useCallback(() => {
-    const cur = new Date(`${currentWeekKey}T00:00:00`)
-    cur.setDate(cur.getDate() - 7)
-    const prevKey = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, "0")}-${String(cur.getDate()).padStart(2, "0")}`
-    setPersisted((prev) => {
-      const draft = structuredClone(prev)
-      const prevWeek = draft.userWeeks[prevKey]
+    const prevKey = previousWeekKey(currentWeekKey)
+    const prevWeek = persistedRef.current.userWeeks[prevKey]
+    if (
+      !prevWeek ||
+      DAYS.reduce((n, d) => n + (prevWeek[d] ?? []).length, 0) === 0
+    ) {
+      toast.message("No data for previous week", {
+        description: "Open a week that has sessions first.",
+      })
+      return
+    }
+    const currentSlots = DAYS.reduce(
+      (n, d) => n + (persistedRef.current.userWeeks[currentWeekKey]?.[d] ?? []).length,
+      0
+    )
+    if (currentSlots > 0) {
       if (
-        !prevWeek ||
-        DAYS.reduce((n, d) => n + (prevWeek[d] ?? []).length, 0) === 0
-      ) {
-        toast.message("No data for previous week", {
-          description: "Open a week that has sessions first.",
-        })
-        return prev
-      }
-      touchWeek(draft, currentWeekKey)
-      const currentSlots = DAYS.reduce(
-        (n, d) => n + (draft.userWeeks[currentWeekKey][d] ?? []).length,
-        0
-      )
-      if (currentSlots > 0) {
-        if (
-          !window.confirm(
-            `This week already has ${currentSlots} slots. Copy will ADD them. Continue?`
-          )
-        ) {
-          return prev
-        }
-      } else if (
         !window.confirm(
-          `Copy all slots from week of ${fmtWeekRange(prevKey)} into ${fmtWeekRange(currentWeekKey)}? Attendance and comments will NOT be copied.`
+          `This week already has ${currentSlots} slots. Copy will ADD them. Continue?`
         )
       ) {
-        return prev
+        return
       }
-
-      DAYS.forEach((day) => {
-        const src = prevWeek[day] ?? []
-        src.forEach((s) => {
-          draft.slotId++
-          draft.userWeeks[currentWeekKey]![day].push({
-            id: draft.slotId,
-            time: s.time,
-            learner: s.learner,
-            trainer: s.trainer || "",
-            coTrainer: s.coTrainer || "",
-            type: s.type || "Regular",
-            note: s.note || "",
-            addedBy: userEmail.split("@")[0] || "copy",
-            addedAt: new Date().toISOString(),
-          })
-        })
-      })
-      logEditMutable(
-        draft,
-        userEmail,
-        "Schedule",
-        "Copied from previous week",
-        `Copied slots from ${prevKey} → ${currentWeekKey}`
+    } else if (
+      !window.confirm(
+        `Copy all slots from week of ${fmtWeekRange(prevKey)} into ${fmtWeekRange(currentWeekKey)}? Attendance and comments will NOT be copied.`
       )
-      scheduleDebouncedSave()
-      return draft
-    })
-  }, [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail])
+    ) {
+      return
+    }
+    void saveNow(() =>
+      workspaceClient.copyWeek(prevKey, currentWeekKey).then(() => refetchWorkspace())
+    )
+  }, [currentWeekKey, refetchWorkspace, saveNow])
 
   const addTrainer = useCallback(
     (name: string) => {
@@ -495,7 +445,7 @@ export function DashboardProvider({
         }
         const draft = structuredClone(prev)
         draft.trainers.push(n)
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(() => workspaceClient.addTrainer(n))
         return draft
       })
     },
@@ -510,9 +460,10 @@ export function DashboardProvider({
           return prev
         }
         if (!window.confirm(`Remove ${prev.trainers[index]}?`)) return prev
+        const name = prev.trainers[index]!
         const draft = structuredClone(prev)
         draft.trainers.splice(index, 1)
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(() => workspaceClient.removeTrainer(name))
         return draft
       })
     },
@@ -557,18 +508,33 @@ export function DashboardProvider({
                 : field === "type"
                   ? "Session Type"
                   : String(field)
-        logEditMutable(
-          draft,
-          userEmail,
-          "Schedule",
-          `Changed ${fieldLabel}`,
-          `${slot.learner || "slot"} · ${currentDay} ${slot.time} · "${String(oldVal ?? "—")}" → "${value || "—"}"`
+        const patchKey =
+          field === "coTrainer"
+            ? "co_trainer"
+            : field === "learner"
+              ? "learner"
+              : field === "trainer"
+                ? "trainer"
+                : field === "type"
+                  ? "type"
+                  : field === "note"
+                    ? "note"
+                    : field
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchSlot({
+            slotId,
+            patch: { [patchKey]: value },
+            log: {
+              section: "Schedule",
+              action: `Changed ${fieldLabel}`,
+              detail: `${slot.learner || "slot"} · ${currentDay} ${slot.time} · "${String(oldVal ?? "—")}" → "${value || "—"}"`,
+            },
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentDay, currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentDay, currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const updateSlotTime = useCallback(
@@ -588,19 +554,23 @@ export function DashboardProvider({
         }
         if (!found || found.time === newTime) return prev
         const oldTime = found.time
+        const learnerLabel = found.learner || "slot"
         found.time = newTime
-        logEditMutable(
-          draft,
-          userEmail,
-          "Schedule",
-          "Changed time",
-          `${found.learner || "slot"} · ${currentDay} · "${oldTime}" → "${newTime}"`
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchSlot({
+            slotId,
+            patch: { time: newTime },
+            log: {
+              section: "Schedule",
+              action: "Changed time",
+              detail: `${learnerLabel} · ${currentDay} · "${oldTime}" → "${newTime}"`,
+            },
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentDay, currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentDay, currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const updateAttendance = useCallback(
@@ -609,32 +579,22 @@ export function DashboardProvider({
         const draft = structuredClone(prev)
         touchWeek(draft, currentWeekKey)
         const ws = ensureWeekStore(draft.allWeekData[currentWeekKey])
-        const prevAtt = getSlotWeekData(ws, slotId).att
         if (!ws.attData[slotId]) ws.attData[slotId] = { att: "", note: "" }
         ws.attData[slotId]!.att = att
         draft.allWeekData[currentWeekKey] = ws
 
-        const slot = findSlotInWeek(draft.userWeeks, currentWeekKey, slotId)
-        const attLabel: Record<string, string> = {
-          P: "Present",
-          A: "Absent",
-          NC: "No-Show",
-          RS: "Rescheduled",
-          "": "Cleared",
-        }
-        logEditMutable(
-          draft,
-          userEmail,
-          "Attendance",
-          `Marked ${attLabel[att] ?? att}`,
-          `${slot?.learner ?? "learner"} · ${currentDay} ${slot?.time ?? ""} · was "${attLabel[prevAtt] ?? prevAtt}"`
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchAttendance({
+            weekKey: currentWeekKey,
+            slotId,
+            att,
+          })
         )
-        scheduleDebouncedSave()
         if (att === "RS") setRsSlotId(slotId)
         return draft
       })
     },
-    [currentDay, currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const deleteSlotById = useCallback(
@@ -654,8 +614,9 @@ export function DashboardProvider({
           }
         }
         if (slot) {
+          const trashId = `${Date.now()}_t`
           draft.trashBin.push({
-            id: `${Date.now()}_t`,
+            id: trashId,
             slot: { ...slot },
             day: currentDay,
             weekKey: currentWeekKey,
@@ -672,15 +633,15 @@ export function DashboardProvider({
             deletedBy: userEmail.split("@")[0] || "unknown",
           })
           draft.deletedSlotIds.push(Number(slotId))
-          logEditMutable(
-            draft,
-            userEmail,
-            "Schedule",
-            "Deleted slot",
-            `${slot.learner} · ${currentDay} ${slot.time} · moved to Trash`
+          void saveNow(() =>
+            workspaceClient.deleteSlot({
+              slotId,
+              weekKey: currentWeekKey,
+              day: currentDay,
+              slot,
+            })
           )
         }
-        void saveNow(draft)
         return draft
       })
     },
@@ -693,9 +654,10 @@ export function DashboardProvider({
         const draft = structuredClone(prev)
         touchWeek(draft, currentWeekKey)
         const dayArr = draft.userWeeks[currentWeekKey]![data.day]
-        draft.slotId++
-        dayArr.push({
-          id: draft.slotId,
+        const optimisticId = draft.slotId + 1
+        draft.slotId = optimisticId
+        const newSlot: Slot = {
+          id: optimisticId,
           time: data.time,
           learner: data.learner,
           note: data.note,
@@ -704,15 +666,27 @@ export function DashboardProvider({
           type: data.type,
           addedBy: userEmail || "unknown",
           addedAt: new Date().toISOString(),
+        }
+        dayArr.push(newSlot)
+        scheduleDebouncedSave(async () => {
+          const { slot } = await workspaceClient.createSlot({
+            weekKey: currentWeekKey,
+            day: data.day,
+            slot: newSlot,
+          })
+          if (slot && Number(slot.id) !== optimisticId) {
+            setPersisted((p) => {
+              const d = structuredClone(p)
+              const arr = d.userWeeks[currentWeekKey]?.[data.day] ?? []
+              const idx = arr.findIndex((s) => s.id === optimisticId)
+              if (idx >= 0) {
+                arr[idx] = { ...arr[idx]!, id: Number(slot.id) }
+              }
+              d.slotId = Math.max(d.slotId, Number(slot.id))
+              return d
+            })
+          }
         })
-        logEditMutable(
-          draft,
-          userEmail,
-          "Schedule",
-          "Added slot",
-          `${data.learner} · ${data.day} ${data.time} · Trainer: ${data.trainer || "—"} · ${data.type}`
-        )
-        scheduleDebouncedSave()
         return draft
       })
     },
@@ -814,32 +788,41 @@ export function DashboardProvider({
           typeof slotId === "number"
             ? findSlotInWeek(draft.userWeeks, currentWeekKey, slotId)
             : null
-        const learnerLabel =
-          slot?.learner ??
-          (typeof slotId === "string" && slotId.startsWith("name:")
-            ? slotId.slice(5)
-            : `notes ${key}`)
-        logEditMutable(
-          draft,
-          userEmail,
-          "Comments",
-          "Added comment",
-          `${learnerLabel} · "${trimmed.substring(0, 60)}${trimmed.length > 60 ? "…" : ""}"`
-        )
-
-        let notifications = draft.notifications
+        const learnerLabel = slot?.learner ?? ""
         parseTaggedUsers(trimmed, draft.trainers).forEach((name) => {
-          notifications = addNotificationDraft(
-            notifications,
-            name,
-            userEmail,
-            trimmed,
-            slot?.learner ?? ""
-          )
+          const trainerKey = name.toLowerCase().replace(/\s+/g, "_")
+          const tkey = trainerKey
+          const nlist = [...(draft.notifications[tkey] ?? [])]
+          const ts =
+            new Date().toLocaleDateString("en-IN", {
+              day: "numeric",
+              month: "short",
+            }) +
+            " " +
+            new Date().toLocaleTimeString("en-IN", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          nlist.push({
+            id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            from: userEmail,
+            msg: `@${name} — "${trimmed.substring(0, 80)}${trimmed.length > 80 ? "…" : ""}" (re: ${learnerLabel || "session"})`,
+            ts,
+            read: false,
+            learnerName: learnerLabel,
+            toTrainerName: name,
+          })
+          draft.notifications = { ...draft.notifications, [tkey]: nlist }
         })
-        draft.notifications = notifications
 
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(() =>
+          workspaceClient.addLearnerNote({
+            slotId,
+            text: trimmed,
+            trainers: draft.trainers,
+            learnerName: learnerLabel,
+          })
+        )
         return draft
       })
     },
@@ -860,7 +843,9 @@ export function DashboardProvider({
         }
         arr.splice(realIdx, 1)
         draft.learnerNotes = { ...draft.learnerNotes, [key]: arr }
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(() =>
+          workspaceClient.deleteLearnerNote({ slotId, revIndex })
+        )
         return draft
       })
     },
@@ -876,19 +861,18 @@ export function DashboardProvider({
         if (!ws.attData[slotId]) ws.attData[slotId] = { att: "", note: "" }
         ws.attData[slotId]!.note = note
         draft.allWeekData[currentWeekKey] = ws
-        const slot = findSlotInWeek(draft.userWeeks, currentWeekKey, slotId)
-        logEditMutable(
-          draft,
-          userEmail,
-          "Session note",
-          "Updated session note",
-          `${slot?.learner ?? "learner"} · ${currentDay} ${slot?.time ?? ""}`
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchAttendance({
+            weekKey: currentWeekKey,
+            slotId,
+            att: ws.attData[slotId]?.att ?? "",
+            note,
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentDay, currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const syncTrackerFromSchedule = useCallback(() => {
@@ -908,17 +892,16 @@ export function DashboardProvider({
       ws.tracker = next
       draft.trackerId = Math.max(draft.trackerId, nextId)
       draft.allWeekData[currentWeekKey] = ws
-      logEditMutable(
-        draft,
-        userEmail,
-        "Lecture Tracker",
-        "Synced learners from schedule",
-        fmtWeekRange(currentWeekKey)
+      scheduleDebouncedSave(() =>
+        workspaceClient.syncTracker({
+          weekKey: currentWeekKey,
+          schedule: wkSched,
+          excludedNames: ws.trackerSyncExcludedNames,
+        })
       )
-      scheduleDebouncedSave()
       return draft
     })
-  }, [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail])
+  }, [currentWeekKey, scheduleDebouncedSave, touchWeek])
 
   const addOrUpdateTrackerLearner = useCallback(
     (entry: Omit<TrackerEntry, "id"> & { name: string }) => {
@@ -959,18 +942,24 @@ export function DashboardProvider({
           })
         }
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Lecture Tracker",
-          ei >= 0 ? "Updated learner" : "Added learner",
-          name
+        scheduleDebouncedSave(() =>
+          workspaceClient.upsertTracker({
+            weekKey: currentWeekKey,
+            entry: {
+              id: ei >= 0 ? ws.tracker[ei]!.id : undefined,
+              name,
+              trainer: entry.trainer,
+              batch: entry.batch,
+              week: weekKey,
+              target: entry.target,
+              notes: entry.notes,
+            },
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const removeTrackerLearner = useCallback(
@@ -990,18 +979,13 @@ export function DashboardProvider({
           }
         }
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Lecture Tracker",
-          "Removed learner",
-          `id ${id}`
+        scheduleDebouncedSave(() =>
+          workspaceClient.removeTracker({ weekKey: currentWeekKey, id })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const addMsgSlot = useCallback(
@@ -1025,18 +1009,29 @@ export function DashboardProvider({
         }
         ws.msgSlots[day] = [...(ws.msgSlots[day] ?? []), slot]
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Message Slots",
-          "Added slot",
-          `${from}–${to} · ${trainers.join(", ") || "unassigned"}`
-        )
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(async () => {
+          const { id: serverId } = await workspaceClient.createMsgSlot({
+            weekKey: currentWeekKey,
+            day,
+            from: from.trim(),
+            to: to.trim(),
+            trainers,
+            notes: notes.trim(),
+          })
+          setPersisted((p) => {
+            const d = structuredClone(p)
+            const w = ensureWeekStore(d.allWeekData[currentWeekKey])
+            const arr = w.msgSlots[day] ?? []
+            const idx = arr.findIndex((s) => String(s.id) === String(slot.id))
+            if (idx >= 0) arr[idx] = { ...arr[idx]!, id: serverId }
+            d.allWeekData[currentWeekKey] = w
+            return d
+          })
+        })
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const updateMsgSlot = useCallback(
@@ -1049,7 +1044,15 @@ export function DashboardProvider({
         const row = { ...ws.msgSlots[loc.day]![loc.index]!, ...patch }
         ws.msgSlots[loc.day]![loc.index] = row
         draft.allWeekData[currentWeekKey] = ws
-        scheduleDebouncedSave()
+        const dbPatch: Record<string, unknown> = {}
+        if (patch.from != null) dbPatch.from_time = patch.from
+        if (patch.to != null) dbPatch.to_time = patch.to
+        if (patch.notes != null) dbPatch.notes = patch.notes
+        if (patch.trainer != null) dbPatch.trainer = patch.trainer
+        if (patch.trainers != null) dbPatch.trainers = patch.trainers
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchMsgSlot({ id: String(slotId), patch: dbPatch })
+        )
         return draft
       })
     },
@@ -1071,18 +1074,16 @@ export function DashboardProvider({
         delete mdd[String(slotId)]
         ws.msgDoneData = mdd
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Message Slots",
-          "Deleted slot",
-          String(slotId)
+        scheduleDebouncedSave(() =>
+          workspaceClient.deleteMsgSlot({
+            weekKey: currentWeekKey,
+            id: String(slotId),
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, userEmail]
+    [currentWeekKey, scheduleDebouncedSave]
   )
 
   const toggleMsgTrainer = useCallback(
@@ -1111,18 +1112,16 @@ export function DashboardProvider({
           trainer: t[0] || "",
         }
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Message Slots",
-          idx >= 0 ? "Removed trainer" : "Added trainer",
-          `${trainerName} · slot ${cur.from}–${cur.to}`
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchMsgSlot({
+            id: String(slotId),
+            patch: { trainers: t, trainer: t[0] || "" },
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, userEmail]
+    [currentWeekKey, scheduleDebouncedSave]
   )
 
   const toggleMsgDone = useCallback(
@@ -1143,18 +1142,25 @@ export function DashboardProvider({
           ws.msgDoneData = { ...ws.msgDoneData, [key]: { done: true, doneAt: ts } }
         }
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Message Slots",
-          cur.done ? "Unmarked done" : "Marked done",
-          key
+        const nextDone = !cur.done
+        const nextAt = nextDone
+          ? new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : null
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchMsgDone({
+            weekKey: currentWeekKey,
+            msgSlotId: key,
+            done: nextDone,
+            doneAt: nextAt,
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const updateTaskField = useCallback(
@@ -1170,21 +1176,21 @@ export function DashboardProvider({
         const ws = ensureWeekStore(draft.allWeekData[currentWeekKey])
         const t = ws.tasks[cat].find((x) => x.id === id)
         if (!t) return prev
-        const oldVal = t[field]
         ;(t as Record<string, string>)[field] = value
-        logEditMutable(
-          draft,
-          userEmail,
-          "Tasks",
-          `Updated ${field}`,
-          `"${t.name}" · ${cat} · "${oldVal || "—"}" → "${value || "—"}"`
-        )
         draft.allWeekData[currentWeekKey] = ws
-        scheduleDebouncedSave()
+        const patchKey =
+          field === "assign" ? "assignee" : field === "date" ? "due_date" : field
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchTask({
+            id,
+            patch: { [patchKey]: value },
+            logDetail: `"${t.name}" · ${cat}`,
+          })
+        )
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const updateTaskStatus = useCallback(
@@ -1195,26 +1201,19 @@ export function DashboardProvider({
         const ws = ensureWeekStore(draft.allWeekData[currentWeekKey])
         const t = ws.tasks[cat].find((x) => x.id === id)
         if (!t) return prev
-        const statusLabel =
-          status === "pending"
-            ? "Pending"
-            : status === "inprogress"
-              ? "In Progress"
-              : "Done"
-        logEditMutable(
-          draft,
-          userEmail,
-          "Tasks",
-          "Changed status",
-          `"${t.name}" · ${cat} · → ${statusLabel}`
-        )
         t.status = status
         draft.allWeekData[currentWeekKey] = ws
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchTask({
+            id,
+            patch: { status },
+            logDetail: `"${t.name}" · ${cat}`,
+          })
+        )
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const deleteTask = useCallback(
@@ -1235,14 +1234,9 @@ export function DashboardProvider({
         }
         ws.tasks[cat] = ws.tasks[cat].filter((t) => t.id !== id)
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Tasks",
-          "Deleted task",
-          `"${task.name}" · ${cat}`
+        scheduleDebouncedSave(() =>
+          workspaceClient.deleteTask({ id, createdBy: task.createdBy })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
@@ -1267,8 +1261,23 @@ export function DashboardProvider({
           createdBy: userEmail,
         })
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(draft, userEmail, "Tasks", "Added task", `"New Task" · ${cat}`)
-        scheduleDebouncedSave()
+        const taskPayload = ws.tasks[cat][ws.tasks[cat].length - 1]!
+        scheduleDebouncedSave(async () => {
+          const { id: serverId } = await workspaceClient.upsertTask({
+            weekKey: currentWeekKey,
+            category: cat,
+            task: taskPayload,
+          })
+          if (serverId !== taskPayload.id) {
+            setPersisted((p) => {
+              const d = structuredClone(p)
+              const w = ensureWeekStore(d.allWeekData[currentWeekKey])
+              const t = w.tasks[cat].find((x) => x.id === taskPayload.id)
+              if (t) t.id = serverId
+              return d
+            })
+          }
+        })
         return draft
       })
     },
@@ -1288,18 +1297,18 @@ export function DashboardProvider({
           id: `t${draft.taskId}`,
         })
         draft.allWeekData[currentWeekKey] = ws
-        logEditMutable(
-          draft,
-          userEmail,
-          "Tasks",
-          "Added task",
-          `"${rest.name}" · ${category}`
+        const newTask = ws.tasks[category][ws.tasks[category].length - 1]!
+        scheduleDebouncedSave(() =>
+          workspaceClient.upsertTask({
+            weekKey: currentWeekKey,
+            category,
+            task: newTask,
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [currentWeekKey, scheduleDebouncedSave, touchWeek, userEmail]
+    [currentWeekKey, scheduleDebouncedSave, touchWeek]
   )
 
   const cycleTaskStatus = useCallback(
@@ -1314,7 +1323,9 @@ export function DashboardProvider({
         const next = order[(order.indexOf(t.status) + 1) % order.length]!
         t.status = next
         draft.allWeekData[currentWeekKey] = ws
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchTask({ id, patch: { status: next }, logDetail: id })
+        )
         return draft
       })
     },
@@ -1357,14 +1368,9 @@ export function DashboardProvider({
         const idx = draft.extRecords.findIndex((r) => r.id === id)
         if (idx >= 0) draft.extRecords[idx] = full
         else draft.extRecords.push(full)
-        logEditMutable(
-          draft,
-          userEmail,
-          "Extension",
-          rec.id ? "Edited record" : "Added record",
-          `${name} · ${full.type ?? "—"}`
+        scheduleDebouncedSave(() =>
+          workspaceClient.upsertExtension({ record: full })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
@@ -1382,14 +1388,9 @@ export function DashboardProvider({
           return prev
         }
         draft.extRecords = draft.extRecords.filter((x) => x.id !== id)
-        logEditMutable(
-          draft,
-          userEmail,
-          "Extension",
-          "Deleted record",
-          `${r.name} · ${r.type ?? ""}`
+        scheduleDebouncedSave(() =>
+          workspaceClient.deleteExtension({ id, createdBy: r.createdBy })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
@@ -1402,20 +1403,14 @@ export function DashboardProvider({
         const draft = structuredClone(prev)
         const r = draft.extRecords.find((x) => x.id === id)
         if (!r) return prev
-        const old = r[field]
         ;(r as Record<string, unknown>)[field as string] = value
-        logEditMutable(
-          draft,
-          userEmail,
-          "Extension",
-          `Changed ${String(field)}`,
-          `${r.name} · "${String(old ?? "—")}" → "${String(value)}"`
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchExtension({ id, field, value })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [scheduleDebouncedSave, userEmail]
+    [scheduleDebouncedSave]
   )
 
   const toggleExtMail = useCallback(
@@ -1426,18 +1421,15 @@ export function DashboardProvider({
         if (!r) return prev
         r.mailSent = !r.mailSent
         if (r.mailSent && r.status !== "Mail Sent") r.status = "Mail Sent"
-        logEditMutable(
-          draft,
-          userEmail,
-          "Extension",
-          r.mailSent ? "Marked mail sent" : "Unmarked mail sent",
-          r.name
+        scheduleDebouncedSave(() =>
+          workspaceClient.patchExtension({
+            record: { ...r },
+          })
         )
-        scheduleDebouncedSave()
         return draft
       })
     },
-    [scheduleDebouncedSave, userEmail]
+    [scheduleDebouncedSave]
   )
 
   const restoreTrashEntry = useCallback(
@@ -1456,18 +1448,11 @@ export function DashboardProvider({
           (x) => Number(x) !== Number(entry.slot.id)
         )
         draft.trashBin = draft.trashBin.filter((e) => e.id !== trashId)
-        logEditMutable(
-          draft,
-          userEmail,
-          "Schedule",
-          "Restored slot",
-          `${entry.slot.learner} · ${entry.day} ${entry.slot.time}`
-        )
-        void saveNow(draft)
+        void saveNow(() => workspaceClient.restoreTrash(trashId))
         return draft
       })
     },
-    [saveNow, touchWeek, userEmail]
+    [saveNow, touchWeek]
   )
 
   const purgeTrashEntry = useCallback(
@@ -1475,7 +1460,7 @@ export function DashboardProvider({
       setPersisted((prev) => {
         const draft = structuredClone(prev)
         draft.trashBin = draft.trashBin.filter((e) => e.id !== trashId)
-        void saveNow(draft)
+        void saveNow(() => workspaceClient.purgeTrash(trashId))
         return draft
       })
     },
@@ -1486,7 +1471,7 @@ export function DashboardProvider({
     setPersisted((prev) => {
       const draft = structuredClone(prev)
       draft.trashBin = []
-      void saveNow(draft)
+      void saveNow(() => workspaceClient.emptyTrash())
       return draft
     })
   }, [saveNow])
@@ -1535,7 +1520,19 @@ export function DashboardProvider({
         notes[rsSlotId] = arr
         draft.learnerNotes = notes
 
-        scheduleDebouncedSave()
+        scheduleDebouncedSave(async () => {
+          await workspaceClient.createSlot({
+            weekKey: targetWeekKey,
+            day: targetDay,
+            slot: newSlot,
+          })
+          await workspaceClient.addLearnerNote({
+            slotId: rsSlotId,
+            text: `🔄 Rescheduled → booked for ${targetDay} ${timeVal} (${dateVal})`,
+            trainers: draft.trainers,
+            learnerName: orig?.learner ?? "",
+          })
+        })
         return draft
       })
       setRsSlotId(null)
@@ -1576,7 +1573,14 @@ export function DashboardProvider({
       })
       notes[id] = arr
       draft.learnerNotes = notes
-      scheduleDebouncedSave()
+      scheduleDebouncedSave(() =>
+        workspaceClient.addLearnerNote({
+          slotId: id,
+          text: "🔄 Rescheduled — next slot to be discussed with learner",
+          trainers: draft.trainers,
+          learnerName: "",
+        })
+      )
       return draft
     })
     setRsSlotId(null)
