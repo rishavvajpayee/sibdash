@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 
 import { parseTaggedUsers } from "@/lib/dashboard/notifications"
+import { formatIstTimestamp } from "@/lib/time"
 import { WORKSPACE_ID } from "@/lib/workspace/constants"
 
 export async function addNotificationsForComment(
@@ -13,16 +14,7 @@ export async function addNotificationsForComment(
   const tagged = parseTaggedUsers(noteText, trainers)
   for (const name of tagged) {
     const trainerKey = name.toLowerCase().replace(/\s+/g, "_")
-    const ts =
-      new Date().toLocaleDateString("en-IN", {
-        day: "numeric",
-        month: "short",
-      }) +
-      " " +
-      new Date().toLocaleTimeString("en-IN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
+    const ts = formatIstTimestamp()
     const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
     await supabase.from("notifications").insert({
       workspace_id: WORKSPACE_ID,

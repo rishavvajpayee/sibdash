@@ -10,6 +10,7 @@ import {
   type TaskStatus,
 } from "@/lib/dashboard/constants"
 import { mergeTrackerFromSchedule } from "@/lib/dashboard/tracker-utils"
+import { formatIstTimestamp } from "@/lib/time"
 import { fmtWeekRange, getWeekKey, previousWeekKey } from "@/lib/dashboard/merge-remote"
 import { WORKSPACE_ID } from "@/lib/workspace/constants"
 import { nextExtId, nextMsgId, nextSlotId, nextTaskId, nextTrackerId } from "@/lib/workspace/db/counters"
@@ -119,10 +120,7 @@ export async function deleteScheduleSlot(
 ) {
   await supabase.from("schedule_slots").delete().eq("workspace_id", WORKSPACE_ID).eq("id", slotId)
   await supabase.from("deleted_slots").upsert({ ...W, slot_id: slotId })
-  const ts =
-    new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short" }) +
-    " " +
-    new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+  const ts = formatIstTimestamp()
   await supabase.from("trash_entries").insert({
     ...W,
     id: `${Date.now()}_t`,
@@ -186,10 +184,7 @@ export async function addLearnerNote(
     .eq("workspace_id", WORKSPACE_ID)
     .eq("slot_id", Number(slotId))
 
-  const ts =
-    new Date().toLocaleDateString("en-IN", { day: "numeric", month: "short" }) +
-    " " +
-    new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+  const ts = formatIstTimestamp()
 
   const { error } = await supabase.from("learner_notes").insert({
     ...W,

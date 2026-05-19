@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 
+import { formatIstTimestamp } from "@/lib/time"
 import { WORKSPACE_ID } from "@/lib/workspace/constants"
 
 export async function appendEditHistory(
@@ -10,11 +11,7 @@ export async function appendEditHistory(
   detail: string
 ) {
   const user = userEmail.split("@")[0] || "unknown"
-  const now = new Date()
-  const ts =
-    now.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) +
-    " " +
-    now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+  const ts = formatIstTimestamp()
 
   const id = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
 

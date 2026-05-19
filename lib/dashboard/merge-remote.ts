@@ -12,25 +12,23 @@ import {
   type WeekStore,
   type WorkspacePayload,
 } from "@/lib/dashboard/constants"
+import { formatIstDate, formatYmd, getIstYmd } from "@/lib/time"
 
 export type DashboardPersisted = Omit<WorkspacePayload, "_savedAt">
 
 export function previousWeekKey(weekKey: string): string {
   const d = new Date(`${weekKey}T00:00:00`)
   d.setDate(d.getDate() - 7)
-  return getWeekKey(d.toISOString().split("T")[0])
+  return getWeekKey(formatYmd(d))
 }
 
 export function getWeekKey(d?: string): string {
-  const dt = d ? new Date(`${d}T00:00:00`) : new Date()
+  const dt = new Date(`${d ?? getIstYmd()}T00:00:00`)
   const day = dt.getDay()
   const diff = dt.getDate() - (day === 0 ? 6 : day - 1)
   const mon = new Date(dt)
   mon.setDate(diff)
-  const yyyy = mon.getFullYear()
-  const mm = String(mon.getMonth() + 1).padStart(2, "0")
-  const dd = String(mon.getDate()).padStart(2, "0")
-  return `${yyyy}-${mm}-${dd}`
+  return formatYmd(mon)
 }
 
 /**
@@ -54,7 +52,7 @@ export function fmtWeekRange(key: string): string {
     day: "numeric",
     month: "short",
   }
-  return `${mon.toLocaleDateString("en-IN", opts)}  ${sat.toLocaleDateString("en-IN", opts)}`
+  return `${formatIstDate(mon, opts)}  ${formatIstDate(sat, opts)}`
 }
 
 export function defaultPersistedState(): DashboardPersisted {

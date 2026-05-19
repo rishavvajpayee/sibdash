@@ -26,6 +26,7 @@ import {
   type TaskCategory,
   type TaskStatus,
 } from "@/lib/dashboard/constants"
+import { formatYmd, getIstYmd } from "@/lib/time"
 import { cn } from "@/lib/utils"
 
 const CAT_META: Record<
@@ -62,13 +63,9 @@ export function TasksTab() {
   const [modalCat, setModalCat] = React.useState<TaskCategory>("training")
   const [atName, setAtName] = React.useState("")
   const [atAssign, setAtAssign] = React.useState("")
-  const [atDate, setAtDate] = React.useState("")
+  const [atDate, setAtDate] = React.useState(() => getIstYmd())
   const [atStatus, setAtStatus] = React.useState<TaskStatus>("pending")
   const [atDelay, setAtDelay] = React.useState("")
-
-  React.useEffect(() => {
-    setAtDate((d) => d || new Date().toISOString().split("T")[0]!)
-  }, [])
 
   const allFlat = React.useMemo(
     () => TASK_CATEGORY_KEYS.flatMap((k) => weekStore.tasks[k] ?? []),
@@ -96,7 +93,7 @@ export function TasksTab() {
     setModalCat(cat ?? "training")
     setAtName("")
     setAtAssign("")
-    setAtDate(dateStr ?? new Date().toISOString().split("T")[0]!)
+    setAtDate(dateStr ?? getIstYmd())
     setAtStatus("pending")
     setAtDelay("")
     setModalOpen(true)
@@ -123,7 +120,7 @@ export function TasksTab() {
     d.setDate(weekStart.getDate() + i)
     weekDays.push(d)
   }
-  const todayStr = new Date().toISOString().split("T")[0]!
+  const todayStr = getIstYmd()
 
   return (
     <div className="space-y-6">
@@ -315,7 +312,7 @@ export function TasksTab() {
           <div className="bg-muted/30 grid grid-cols-[140px_repeat(6,1fr)] border-b text-center text-[10px] font-bold tracking-wider uppercase">
             <div className="border-r p-3 text-left">Category</div>
             {weekDays.map((d, i) => {
-              const dStr = d.toISOString().split("T")[0]!
+              const dStr = formatYmd(d)
               const isToday = dStr === todayStr
               return (
                 <div key={dStr} className="border-r p-2 last:border-r-0">
@@ -354,7 +351,7 @@ export function TasksTab() {
                   </span>
                 </div>
                 {weekDays.map((d) => {
-                  const dStr = d.toISOString().split("T")[0]!
+                  const dStr = formatYmd(d)
                   const dayTasks = filtered.filter((t) => t.date === dStr)
                   return (
                     <div

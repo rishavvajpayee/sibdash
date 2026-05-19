@@ -46,6 +46,7 @@ import {
   weekKeyForCalendarDate,
 } from "@/lib/dashboard/schedule-utils"
 import { createClient } from "@/lib/supabase/client"
+import { formatIstTime, formatIstTimestamp, getIstYmd } from "@/lib/time"
 
 type SyncStatus = "idle" | "syncing" | "saved" | "error"
 
@@ -620,16 +621,7 @@ export function DashboardProvider({
             slot: { ...slot },
             day: currentDay,
             weekKey: currentWeekKey,
-            deletedAt:
-              new Date().toLocaleDateString("en-IN", {
-                day: "numeric",
-                month: "short",
-              }) +
-              " " +
-              new Date().toLocaleTimeString("en-IN", {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
+            deletedAt: formatIstTimestamp(),
             deletedBy: userEmail.split("@")[0] || "unknown",
           })
           draft.deletedSlotIds.push(Number(slotId))
@@ -765,16 +757,7 @@ export function DashboardProvider({
         const notes = { ...draft.learnerNotes }
         const key = String(slotId)
         const arr = [...(notes[key] ?? [])]
-        const ts =
-          new Date().toLocaleDateString("en-IN", {
-            day: "numeric",
-            month: "short",
-          }) +
-          " " +
-          new Date().toLocaleTimeString("en-IN", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
+        const ts = formatIstTimestamp()
         arr.push({
           authorEmail: userEmail,
           trainer: userEmail.split("@")[0],
@@ -793,16 +776,7 @@ export function DashboardProvider({
           const trainerKey = name.toLowerCase().replace(/\s+/g, "_")
           const tkey = trainerKey
           const nlist = [...(draft.notifications[tkey] ?? [])]
-          const ts =
-            new Date().toLocaleDateString("en-IN", {
-              day: "numeric",
-              month: "short",
-            }) +
-            " " +
-            new Date().toLocaleTimeString("en-IN", {
-              hour: "2-digit",
-              minute: "2-digit",
-            })
+          const ts = formatIstTimestamp()
           nlist.push({
             id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
             from: userEmail,
@@ -1135,16 +1109,13 @@ export function DashboardProvider({
         if (cur.done) {
           ws.msgDoneData = { ...ws.msgDoneData, [key]: { done: false, doneAt: null } }
         } else {
-          const ts = new Date().toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
+          const ts = formatIstTime(new Date(), { hour: "2-digit", minute: "2-digit" })
           ws.msgDoneData = { ...ws.msgDoneData, [key]: { done: true, doneAt: ts } }
         }
         draft.allWeekData[currentWeekKey] = ws
         const nextDone = !cur.done
         const nextAt = nextDone
-          ? new Date().toLocaleTimeString([], {
+          ? formatIstTime(new Date(), {
               hour: "2-digit",
               minute: "2-digit",
             })
@@ -1249,7 +1220,7 @@ export function DashboardProvider({
         const draft = structuredClone(prev)
         touchWeek(draft, currentWeekKey)
         const ws = ensureWeekStore(draft.allWeekData[currentWeekKey])
-        const today = new Date().toISOString().split("T")[0]!
+        const today = getIstYmd()
         draft.taskId += 1
         ws.tasks[cat].push({
           id: `t${draft.taskId}`,
@@ -1501,16 +1472,7 @@ export function DashboardProvider({
 
         const notes = { ...draft.learnerNotes }
         const arr = [...(notes[rsSlotId] ?? [])]
-        const ts =
-          new Date().toLocaleDateString("en-IN", {
-            day: "numeric",
-            month: "short",
-          }) +
-          " " +
-          new Date().toLocaleTimeString("en-IN", {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
+        const ts = formatIstTimestamp()
         arr.push({
           authorEmail: userEmail,
           trainer: userEmail.split("@")[0],
@@ -1555,16 +1517,7 @@ export function DashboardProvider({
       const draft = structuredClone(prev)
       const notes = { ...draft.learnerNotes }
       const arr = [...(notes[id] ?? [])]
-      const ts =
-        new Date().toLocaleDateString("en-IN", {
-          day: "numeric",
-          month: "short",
-        }) +
-        " " +
-        new Date().toLocaleTimeString("en-IN", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })
+        const ts = formatIstTimestamp()
       arr.push({
         authorEmail: userEmail,
         trainer: userEmail.split("@")[0],

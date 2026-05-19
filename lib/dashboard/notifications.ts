@@ -1,3 +1,5 @@
+import { formatIstTimestamp } from "@/lib/time"
+
 export function parseTaggedUsers(text: string, trainers: string[]): string[] {
   const matches: string[] = []
   const re = /@([A-Za-z][A-Za-z0-9 ._]*)/g
@@ -21,16 +23,7 @@ export function addNotificationDraft(
   const next = { ...notifications }
   const key = toTrainerName.toLowerCase().replace(/\s+/g, "_")
   const arr = [...(next[key] ?? [])]
-  const ts =
-    new Date().toLocaleDateString("en-IN", {
-      day: "numeric",
-      month: "short",
-    }) +
-    " " +
-    new Date().toLocaleTimeString("en-IN", {
-      hour: "2-digit",
-      minute: "2-digit",
-    })
+  const ts = formatIstTimestamp()
   arr.push({
     id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     from: fromEmail || "someone",

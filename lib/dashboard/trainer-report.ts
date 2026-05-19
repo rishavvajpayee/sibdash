@@ -1,13 +1,7 @@
 import { DAYS, type Day, type Slot } from "@/lib/dashboard/constants"
 import { fmtWeekRange } from "@/lib/dashboard/merge-remote"
 import { tmin } from "@/lib/dashboard/schedule-utils"
-
-function fmtLocalYmd(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, "0")
-  const day = String(d.getDate()).padStart(2, "0")
-  return `${y}-${m}-${day}`
-}
+import { formatIstDate, formatYmd, getIstYmd } from "@/lib/time"
 
 export type SessionWithMeta = Slot & {
   day: Day
@@ -23,16 +17,13 @@ export function getMonthOptions(weekKeys: string[]): string[] {
       `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
     )
   })
-  const now = new Date()
-  months.add(
-    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`
-  )
+  months.add(getIstYmd().slice(0, 7))
   return [...months].sort().reverse()
 }
 
 export function fmtMonthLabel(ym: string): string {
   const [y, m] = ym.split("-")
-  return new Date(+y!, +m! - 1, 1).toLocaleDateString("en-IN", {
+  return formatIstDate(new Date(+y!, +m! - 1, 1), {
     month: "long",
     year: "numeric",
   })
@@ -73,7 +64,7 @@ export function getAllSessionsForMonth(
           ...s,
           day,
           weekKey: wk,
-          slotDate: fmtLocalYmd(slotDate),
+          slotDate: formatYmd(slotDate),
         })
       })
     })

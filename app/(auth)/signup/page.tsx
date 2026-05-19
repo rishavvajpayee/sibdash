@@ -24,19 +24,29 @@ export default function SignupPage() {
   const [password, setPassword] = React.useState("")
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const [notice, setNotice] = React.useState<string | null>(null)
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
     setError(null)
+    setNotice(null)
     const supabase = createClient()
-    const { error: signErr } = await supabase.auth.signUp({
+    const origin = window.location.origin
+    const { data, error: signErr } = await supabase.auth.signUp({
       email,
       password,
+      options: {
+        emailRedirectTo: `${origin}/auth/callback?next=/dashboard/schedule`,
+      },
     })
     setLoading(false)
     if (signErr) {
       setError(signErr.message)
+      return
+    }
+    if (!data.session) {
+      setNotice("Check your email for a confirmation link, then come back to sign in.")
       return
     }
     router.replace("/dashboard/schedule")
@@ -67,6 +77,11 @@ export default function SignupPage() {
           className="space-y-5"
           onSubmit={onSubmit}
         >
+          {notice ? (
+            <p className="text-muted-foreground text-sm" role="status">
+              {notice}
+            </p>
+          ) : null}
           {error ? (
             <p className="text-destructive text-sm" role="alert">
               {error}
